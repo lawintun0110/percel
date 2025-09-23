@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://tumedx.com/sitemap.xml
