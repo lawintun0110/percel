@@ -1,0 +1,366 @@
+{% extends 'includes/base.html' %}
+
+{% block content %}
+<div class="container mx-auto p-8 bg-gray-50 min-h-screen">
+    <h1 class="text-4xl font-extrabold text-gray-900 mb-2 text-center">Student Progress for <span class="text-indigo-600">{{ course.title }}</span></h1>
+    <p class="text-lg text-gray-600 mb-8 text-center max-w-2xl mx-auto">
+        This graph visualizes the learning progress based on the Power Law, showing a continuous curve of error reduction over time.
+    </p>
+     <a href="{{ url_for('teacher.view_course_options', course_id=course.id) }}"
+           class="inline-flex items-center px-4 py-2 bg-blue-500 text-white rounded-full shadow-md hover:bg-blue-600 transition duration-300 text-sm font-semibold">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M11 17l-5-5m0 0l5-5m-5 5h12" />
+            </svg>
+            Back to Options
+        </a>
+
+    <div class="bg-white p-6 rounded-lg shadow-xl mb-8 max-w-5xl mx-auto">
+        <h2 id="chartTitle" class="text-2xl font-bold text-gray-800 mb-4">Learning Curve</h2>
+        <div class="relative h-48">
+            <canvas id="learningCurveChart"></canvas>
+        </div>
+        <div class="text-center mt-4">
+            <p class="text-gray-700 font-semibold text-lg">
+                <span id="indexLabel">Whose Learning Index</span>: <span id="learningIndex" class="text-indigo-600">Calculating...</span>
+            </p>
+        </div> 
+    </div>
+
+    <div class="bg-white p-6 rounded-lg shadow-xl max-w-5xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-800 mb-4">Individual Student Progress</h2>
+        <p class="text-gray-600 mb-4">Click a student's name to view their individual learning curve.</p>
+        <div id="studentList" class="flex flex-wrap gap-2 justify-center">
+            </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script>
+const rawData = JSON.parse('{{ raw_data | safe }}');
+
+const studentListContainer = document.getElementById('studentList');
+const chartCanvas = document.getElementById('learningCurveChart');
+const ctx = chartCanvas.getContext('2d');
+let learningCurveChart;
+
+const chartTitleElement = document.getElementById('chartTitle');
+const indexLabelElement = document.getElementById('indexLabel');
+const learningIndexElement = document.getElementById('learningIndex');
+
+// --- Get hybrid total attempts ---
+function getTotalAttempts(dataset) {
+    if (!dataset || dataset.length === 0) return 0;
+    return Math.max(...dataset.map(p => p[0]));
+}
+function getHybridTotalAttempts(dataset) {
+    return Math.max(5, getTotalAttempts(dataset));
+}
+
+// --- NEW: Calculate Learning Index using power law formula ---
+function calculateLearningIndex(dataset) {
+    if (!dataset || dataset.length < 2) return 0;
+
+    // Process data: replace zeros with 0.0001, handle null/undefined
+    const processedData = dataset.map(([attempt, errors]) => {
+        let processedErrors = errors;
+        if (processedErrors === null || processedErrors === undefined) {
+            processedErrors = 0;
+        }
+        if (processedErrors === 0) {
+            processedErrors = 0.0001;
+        }
+        return [attempt, processedErrors];
+    });
+
+    let sumLnX = 0, sumLnY = 0, sumLnXLnY = 0, sumLnX2 = 0;
+    const n = processedData.length;
+
+    processedData.forEach(([attempt, errors]) => {
+        const lnX = Math.log(attempt);
+        const lnY = Math.log(errors);
+        
+        sumLnX += lnX;
+        sumLnY += lnY;
+        sumLnXLnY += lnX * lnY;
+        sumLnX2 += lnX * lnX;
+    });
+
+    const numerator = n * sumLnXLnY - sumLnX * sumLnY;
+    const denominator = n * sumLnX2 - Math.pow(sumLnX, 2);
+
+    return denominator === 0 ? 0 : numerator / denominator;
+}
+
+// --- NEW: Generate learning curve points with actual + predicted ---
+function generateLearningCurvePoints(dataset, maxAttempts = 5) {
+    const learningIndex = calculateLearningIndex(dataset);
+    let T1 = dataset.length > 0 ? dataset[0][1] : 0;
+    if (T1 === 0 || T1 === null || T1 === undefined) T1 = 0.0001;
+
+    const curvePoints = [];
+    
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const actualPoint = dataset.find(point => point[0] === attempt);
+        
+        if (actualPoint && actualPoint[1] !== null && actualPoint[1] !== undefined) {
+            // Use actual data point
+            curvePoints.push({
+                x: attempt,
+                y: actualPoint[1],
+                type: 'actual'
+            });
+        } else {
+            // Generate predicted point if we have enough data
+            if (dataset.length >= 2) {
+                const predictedErrors = T1 * Math.pow(attempt, -learningIndex);
+                curvePoints.push({
+                    x: attempt,
+                    y: Math.max(0, predictedErrors),
+                    type: 'predicted'
+                });
+            } else {
+                // Not enough data for prediction
+                curvePoints.push({
+                    x: attempt,
+                    y: null,
+                    type: 'none'
+                });
+            }
+        }
+    }
+    
+    return { points: curvePoints.filter(p => p.y !== null), learningIndex };
+}
+
+// --- MODIFIED: Power Law regression (keeping your original but fixing the sign) ---
+function getPowerLawParams(dataset, MaxErrors = 10) {
+    const filtered = (dataset || []).filter(p => p && p[0] > 0);
+    if (filtered.length === 0) return { T1: 0, b: 0, rSquared: 0, mode: 'No data' };
+
+    const hasZero = filtered.some(p => p[1] === 0);
+
+    let mode = 'Error-based';
+    let regressionPoints = [];
+    let T1 = filtered[0][1] || 0;
+
+    if (hasZero) {
+        mode = 'Success-based';
+        regressionPoints = filtered.map(([x, e]) => {
+            const s = Math.max(0.01, 1 - (e || 0) / MaxErrors);
+            return [x, s];
+        });
+        T1 = regressionPoints[0][1];
+    } else {
+        regressionPoints = filtered.filter(p => p[1] > 0);
+        if (regressionPoints.length === 0) return { T1, b: 0, rSquared: 0, mode };
+    }
+
+    const n = regressionPoints.length;
+    let sum_log_x = 0, sum_log_y = 0, sum_log_xy = 0, sum_log_x2 = 0, sum_log_y2 = 0;
+    
+    regressionPoints.forEach(([x, y]) => {
+        const logX = Math.log(x);  // Changed from log10 to natural log
+        const logY = Math.log(y);
+        sum_log_x += logX;
+        sum_log_y += logY;
+        sum_log_xy += logX * logY;
+        sum_log_x2 += logX * logX;
+        sum_log_y2 += logY * logY;
+    });
+
+    const denominator = n * sum_log_x2 - sum_log_x * sum_log_x;
+    const numerator = n * sum_log_xy - sum_log_x * sum_log_y;
+    const b = denominator === 0 ? 0 : numerator / denominator;
+
+    // For error-based model, we want positive b for learning
+    const adjustedB = Math.abs(b);
+
+    const rSquared = denominator === 0 ? 0 :
+        Math.pow(numerator / Math.sqrt(
+            (n * sum_log_x2 - sum_log_x * sum_log_x) *
+            (n * sum_log_y2 - sum_log_y * sum_log_y)
+        ), 2);
+
+    return { T1, b: adjustedB, rSquared, mode };
+}
+
+// --- MODIFIED: Generate Power Law Curve with better prediction ---
+function generatePowerLawCurve(T1, b, totalAttempts, dataset = []) {
+    const data = [];
+    if (!totalAttempts || totalAttempts <= 0) return data;
+
+    const safeDataset = Array.isArray(dataset) ? dataset : [];
+
+    for (let n = 1; n <= totalAttempts; n++) {
+        const actual = safeDataset.find(p => Array.isArray(p) && p[0] === n);
+        
+        if (actual && actual.length > 1 && actual[1] != null) {
+            // Use actual data point
+            data.push({ x: n, y: actual[1], type: 'actual' });
+        } else if (safeDataset.length >= 2) {
+            // Only predict if we have enough data
+            const Tn = T1 * Math.pow(n, -b);
+            data.push({ x: n, y: isNaN(Tn) ? 0 : Tn, type: 'predicted' });
+        } else {
+            // Not enough data for prediction
+            data.push({ x: n, y: null, type: 'none' });
+        }
+    }
+    
+    return data.filter(point => point.y !== null);
+}
+
+// --- MODIFIED: Create Chart with enhanced visualization ---
+function createChart(rawDataPoints, title) {
+    if (learningCurveChart) learningCurveChart.destroy();
+
+    const maxAttempts = getHybridTotalAttempts(rawDataPoints);
+    const { T1, b } = getPowerLawParams(rawDataPoints);
+    const curveData = generatePowerLawCurve(T1, b, maxAttempts, rawDataPoints);
+    
+    // Separate actual and predicted points for better visualization
+    const actualPoints = curveData.filter(point => point.type === 'actual');
+    const predictedPoints = curveData.filter(point => point.type === 'predicted');
+    const allPoints = curveData;
+    console.log(curveData)
+
+    learningCurveChart = new Chart(ctx, {
+        type: 'scatter',
+        data: {
+            datasets: [
+                {
+                    label: 'Actual Data Points',
+                    data: actualPoints.map(d => ({ x: d.x, y: d.y })),
+                    backgroundColor: 'rgba(75, 192, 192, 1)',
+                    pointRadius: 8,
+                    pointHoverRadius: 10,
+                    showLine: false
+                },
+                {
+                    label: 'Learning Curve',
+                    data: allPoints.map(d => ({ x: d.x, y: d.y })),
+                    type: 'line',
+                    fill: false,
+                    borderColor: 'rgb(255, 99, 132)',
+                    backgroundColor: 'rgb(255, 99, 132)',
+                    borderWidth: 3,
+                    pointRadius: 0,
+                    tension: 0.4
+                },
+                {
+                    label: 'Predicted Points',
+                    data: predictedPoints.map(d => ({ x: d.x, y: d.y })),
+                    backgroundColor: 'rgba(255, 205, 86, 1)',
+                    pointRadius: 6,
+                    pointHoverRadius: 8,
+                    showLine: false
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: {
+                    type: 'linear',
+                    min: 1,
+                    max: maxAttempts,
+                    title: { 
+                        display: true, 
+                        text: 'Attempts', 
+                        font: { size: 16, weight: 'bold' } 
+                    },
+                    ticks: { 
+                        stepSize: 1, 
+                        autoSkip: false 
+                    }
+                },
+                y: {
+                    min: 0,
+                    suggestedMax: 50,
+                    title: { 
+                        display: true, 
+                        text: 'Errors', 
+                        font: { size: 16, weight: 'bold' } 
+                    },
+                    ticks: { 
+                        autoSkip: false, 
+                        maxTicksLimit: 10 
+                    }
+                }
+            },
+            plugins: {
+                tooltip: {
+                    callbacks: {
+                        label: (context) => {
+                            const { x, y } = context.raw;
+                            const pointType = context.datasetIndex === 0 ? 'Actual' : 
+                                            context.datasetIndex === 2 ? 'Predicted' : 'Curve';
+                            return `${pointType} - Attempt: ${x}, Errors: ${y.toFixed(2)}`;
+                        }
+                    }
+                },
+                legend: { 
+                    labels: { 
+                        font: { size: 14 },
+                        usePointStyle: true
+                    } 
+                }
+            }
+        }
+    });
+
+    // Update UI elements
+    chartTitleElement.textContent = title + "'s Learning Curve";
+    indexLabelElement.textContent = 'Learning Index (b)';
+    learningIndexElement.textContent = b.toFixed(4);
+    
+    // NEW: Add interpretation
+    const interpretation = getLearningInterpretation(b);
+    if (!document.getElementById('interpretation')) {
+        const interpretationElement = document.createElement('div');
+        interpretationElement.id = 'interpretation';
+        interpretationElement.className = 'text-sm text-gray-600 mt-2';
+        learningIndexElement.parentNode.appendChild(interpretationElement);
+    }
+    document.getElementById('interpretation').textContent = `Interpretation: ${interpretation}`;
+}
+
+// --- NEW: Get learning interpretation ---
+function getLearningInterpretation(b) {
+    if (b === 0) return "No learning effect or insufficient data";
+    if (b < 0.3) return "Mild learning effect";
+    if (b < 0.7) return "Moderate learning effect";
+    if (b < 1.0) return "Good learning effect";
+    if (b < 2.0) return "Strong learning effect";
+    return "Very strong learning effect";
+
+}
+
+// --- Setup student buttons (unchanged) ---
+document.addEventListener('DOMContentLoaded', () => {
+    rawData.students.forEach(student => {
+        const button = document.createElement('button');
+        button.textContent = student.name;
+        button.className = 'student-button bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold py-2 px-4 rounded-full';
+        button.onclick = () => {
+            createChart(student.data, student.name);
+            document.querySelectorAll('.student-button').forEach(btn => 
+                btn.classList.remove('bg-indigo-600', 'text-white'));
+            button.classList.add('bg-indigo-600', 'text-white');
+        };
+        studentListContainer.appendChild(button);
+    });
+
+    // NEW: Auto-create chart for first student
+    if (rawData.students.length > 0) {
+        const firstButton = studentListContainer.querySelector('.student-button');
+        if (firstButton) {
+            firstButton.click();
+        }
+    }
+});
+</script>
+
+{% endblock %}
