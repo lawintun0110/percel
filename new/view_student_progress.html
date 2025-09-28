@@ -1,0 +1,495 @@
+{% extends 'includes/base.html' %}
+
+{% block content %}
+<div class="container mx-auto p-8 bg-gray-50 min-h-screen">
+    <h1 class="text-4xl font-extrabold text-gray-900 mb-2 text-center">Student Progress for <span class="text-indigo-600">{{ course.title }}</span></h1>
+    <p class="text-lg text-gray-600 mb-8 text-center max-w-2xl mx-auto">
+        This graph visualizes the learning progress based on the Power Law, showing a continuous curve of error reduction over time.
+    </p>
+
+    <a href="{{ url_for('teacher.view_course_options', course_id=course.id) }}"
+       class="inline-flex items-center px-4 py-2 bg-blue-500 text-white rounded-full shadow-md hover:bg-blue-600 transition duration-300 text-sm font-semibold mb-8">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M11 17l-5-5m0 0l5-5m-5 5h12" />
+        </svg>
+        Back to Options
+    </a>
+
+    <!-- Chapter Progress Section -->
+    <div class="bg-white p-6 rounded-lg shadow-xl mb-8 max-w-5xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-800 mb-6">Chapter Progress - <span id="currentStudentName">Select a Student</span></h2>
+        
+        <!-- File Status Summary -->
+        <!-- <div id="statusSummary" class="mb-6 p-4 bg-gray-50 rounded-lg">
+            <h3 class="font-semibold text-gray-700 mb-2">File Status:</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                <div><span class="font-medium">Certificate File:</span> <span id="certStatus">❓ Checking...</span></div>
+                <div><span class="font-medium">Score File:</span> <span id="scoreStatus">❓ Checking...</span></div>
+            </div>
+        </div> -->
+        
+        <div class="mb-4">
+            <div class="flex justify-between text-sm text-gray-600 mb-2">
+                <span>Completion: <span id="progressPercent">0%</span></span>
+                <span><span id="passedChapters">0</span> passed, <span id="failedChapters">0</span> failed, <span id="unreachChapters">0</span> unreach of <span id="totalChapters">0</span> total</span>
+            </div>
+            <div class="w-full bg-gray-200 rounded-full h-2">
+                <div id="progressBar" class="bg-green-500 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+            </div>
+        </div>
+        
+        <!-- Chapter Blocks Grid -->
+        <div id="chapterGrid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+            <div class="col-span-full text-center py-8 text-gray-500">
+                Please select a student to view their chapter progress
+            </div>
+        </div>
+        
+        <!-- Legend -->
+        <div class="flex flex-wrap gap-4 mt-6 text-sm">
+            <div class="flex items-center">
+                <div class="w-4 h-4 bg-green-500 rounded mr-2"></div>
+                <span class="text-gray-600">Passed </span>
+            </div>
+            <div class="flex items-center">
+                <div class="w-4 h-4 bg-red-500 rounded mr-2"></div>
+                <span class="text-gray-600">Failed </span>
+            </div>
+            <div class="flex items-center">
+                <div class="w-4 h-4 bg-gray-300 rounded mr-2"></div>
+                <span class="text-gray-600">Unreach </span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Learning Curve Section -->
+    <div class="bg-white p-6 rounded-lg shadow-xl mb-8 max-w-5xl mx-auto">
+        <h2 id="chartTitle" class="text-2xl font-bold text-gray-800 mb-4">Learning Curve</h2>
+        <div class="relative h-48">
+            <canvas id="learningCurveChart"></canvas>
+        </div>
+        <div class="text-center mt-4">
+            <p class="text-gray-700 font-semibold text-lg">
+                <span id="indexLabel">Learning Index</span>: <span id="learningIndex" class="text-indigo-600">Calculating...</span>
+            </p>
+            <div id="interpretation" class="text-sm text-gray-600 mt-2"></div>
+        </div> 
+    </div>
+
+    <!-- Student List Section -->
+    <div class="bg-white p-6 rounded-lg shadow-xl max-w-5xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-800 mb-4">Individual Student Progress</h2>
+        <p class="text-gray-600 mb-4">Click a student's name to view their individual learning curve and chapter progress.</p>
+        <div id="studentList" class="flex flex-wrap gap-2 justify-center">
+            <!-- Student buttons will be dynamically inserted here -->
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script>
+// Initialize global variables
+const rawData = JSON.parse('{{ raw_data | safe }}');
+
+console.log('Raw data received:', rawData);
+
+const studentListContainer = document.getElementById('studentList');
+const chartCanvas = document.getElementById('learningCurveChart');
+const ctx = chartCanvas.getContext('2d');
+let learningCurveChart;
+
+const chartTitleElement = document.getElementById('chartTitle');
+const indexLabelElement = document.getElementById('indexLabel');
+const learningIndexElement = document.getElementById('learningIndex');
+const currentStudentNameElement = document.getElementById('currentStudentName');
+
+// --- Utility Functions ---
+function getTotalAttempts(dataset) {
+    if (!dataset || dataset.length === 0) return 0;
+    return Math.max(...dataset.map(p => p[0]));
+}
+
+function getHybridTotalAttempts(dataset) {
+    return Math.max(5, getTotalAttempts(dataset));
+}
+
+function calculateLearningIndex(dataset) {
+    if (!dataset || dataset.length < 2) return 0;
+
+    const processedData = dataset.map(([attempt, errors]) => {
+        let processedErrors = errors;
+        if (processedErrors === null || processedErrors === undefined) processedErrors = 0;
+        if (processedErrors === 0) processedErrors = 0.0001;
+        return [attempt, processedErrors];
+    });
+
+    let sumLnX = 0, sumLnY = 0, sumLnXLnY = 0, sumLnX2 = 0;
+    const n = processedData.length;
+
+    processedData.forEach(([attempt, errors]) => {
+        const lnX = Math.log(attempt);
+        const lnY = Math.log(errors);
+        sumLnX += lnX;
+        sumLnY += lnY;
+        sumLnXLnY += lnX * lnY;
+        sumLnX2 += lnX * lnX;
+    });
+
+    const numerator = n * sumLnXLnY - sumLnX * sumLnY;
+    const denominator = n * sumLnX2 - Math.pow(sumLnX, 2);
+    return denominator === 0 ? 0 : numerator / denominator;
+}
+
+function getPowerLawParams(dataset) {
+    const filtered = (dataset || []).filter(p => p && p[0] > 0);
+    if (filtered.length === 0) return { T1: 0, b: 0, rSquared: 0, mode: 'No data' };
+
+    const processedData = filtered.map(([attempt, errors]) => {
+        let processedErrors = errors;
+        if (processedErrors === 0) processedErrors = 0.0001;
+        return [attempt, processedErrors];
+    });
+
+    let regressionPoints = processedData;
+    let T1 = processedData[0][1] || 0.0001;
+
+    if (regressionPoints.length === 0) return { T1, b: 0, rSquared: 0, mode: 'Error-based' };
+
+    const n = regressionPoints.length;
+    let sum_log_x = 0, sum_log_y = 0, sum_log_xy = 0, sum_log_x2 = 0, sum_log_y2 = 0;
+    
+    regressionPoints.forEach(([x, y]) => {
+        const logX = Math.log(x);
+        const logY = Math.log(y);
+        sum_log_x += logX;
+        sum_log_y += logY;
+        sum_log_xy += logX * logY;
+        sum_log_x2 += logX * logX;
+        sum_log_y2 += logY * logY;
+    });
+
+    const denominator = n * sum_log_x2 - sum_log_x * sum_log_x;
+    const numerator = n * sum_log_xy - sum_log_x * sum_log_y;
+    const b = denominator === 0 ? 0 : numerator / denominator;
+    const adjustedB = Math.abs(b);
+
+    return { T1, b: adjustedB, rSquared: 0, mode: 'Error-based' };
+}
+
+function generatePowerLawCurve(T1, b, totalAttempts, dataset = []) {
+    const data = [];
+    if (!totalAttempts || totalAttempts <= 0) return data;
+
+    const safeDataset = Array.isArray(dataset) ? dataset : [];
+
+    for (let n = 1; n <= totalAttempts; n++) {
+        const actual = safeDataset.find(p => Array.isArray(p) && p[0] === n);
+        
+        if (actual && actual.length > 1 && actual[1] != null) {
+            data.push({ x: n, y: actual[1], type: 'actual' });
+        } else if (safeDataset.length >= 2) {
+            const Tn = T1 * Math.pow(n, -b);
+            data.push({ x: n, y: isNaN(Tn) ? 0 : Tn, type: 'predicted' });
+        } else {
+            data.push({ x: n, y: null, type: 'none' });
+        }
+    }
+    
+    return data.filter(point => point.y !== null);
+}
+
+function getLearningInterpretation(b) {
+    if (b === 0) return "No learning effect or insufficient data";
+    if (b < 0.3) return "Mild learning effect";
+    if (b < 0.7) return "Moderate learning effect";
+    if (b < 1.0) return "Good learning effect";
+    if (b < 2.0) return "Strong learning effect";
+    return "Very strong learning effect";
+}
+
+// --- Chapter Progress Functions ---
+function createChapterBlock(chapter) {
+    const block = document.createElement('div');
+    
+    let bgColor, textColor, borderColor, icon, statusText;
+    switch(chapter.status) {
+        case 'completed': 
+            bgColor = 'bg-green-50'; textColor = 'text-green-700'; borderColor = 'border-green-200'; 
+            icon = '✓'; statusText = 'completed';
+            break;
+        case 'failed': 
+            bgColor = 'bg-red-50'; textColor = 'text-red-700'; borderColor = 'border-red-200'; 
+            icon = '✗'; statusText = 'failed';
+            break;
+        case 'unreach': 
+        default:
+            bgColor = 'bg-gray-50'; textColor = 'text-gray-500'; borderColor = 'border-gray-200'; 
+            icon = '○'; statusText = 'Unreach';
+    }
+    
+    block.className = `${bgColor} ${borderColor} ${textColor} border-2 rounded-lg p-4 text-center cursor-pointer transition-all duration-300 transform hover:scale-105 hover:shadow-md flex flex-col items-center justify-center min-h-[100px] relative`;
+    
+    // Create tooltip with file values
+    const certDisplay = chapter.cert_value !== null ? chapter.cert_value : 'N/A';
+    const scoreDisplay = chapter.score_value !== null ? chapter.score_value : 'N/A';
+    const tooltip = `Certificate: ${certDisplay}, Score: ${scoreDisplay}`;
+    //block.title = tooltip;
+    
+    block.innerHTML = `
+        <div class="text-2xl font-bold mb-2">${icon}</div>
+        <div class="font-semibold text-sm mb-1">Chapter ${chapter.chapter}</div>
+        <div class="text-xs opacity-75 line-clamp-2">${chapter.title}</div>
+        <div class="mt-2 text-xs font-medium px-2 py-1 rounded-full ${getStatusBadgeColor(chapter.status)}">
+            ${statusText}
+        </div>
+        ${chapter.status !== 'unreach' ? `
+        <div class="absolute top-1 right-1 flex space-x-1">
+        </div>
+        ` : ''}
+    `;
+    
+    block.addEventListener('click', () => showChapterDetails(chapter));
+    return block;
+}
+
+function getStatusBadgeColor(status) {
+    switch(status) {
+        case 'completed': return 'bg-green-100 text-green-800';
+        case 'failed': return 'bg-red-100 text-red-800';
+        case 'unreach': 
+        default: return 'bg-gray-100 text-gray-800';
+    }
+}
+
+function showChapterDetails(chapter) {
+    const statusMap = {
+        'completed': 'Chapter passed successfully! 🎉',
+        'failed': 'Chapter needs improvement.',
+        'unreach': 'Chapter not yet attempted.'
+    };
+    
+    const certDisplay = chapter.cert_value !== null ? chapter.cert_value : 'Not found';
+    const scoreDisplay = chapter.score_value !== null ? chapter.score_value : 'Not found';
+    
+    const details = `
+Chapter ${chapter.chapter}: ${chapter.title}
+
+Status: ${statusMap[chapter.status]}
+Certificate File: ${certDisplay}
+Score File: ${scoreDisplay}
+
+Rules:
+- Passed: Both files must contain 1
+- Failed: Any file contains 0
+- Unreach: Chapter not found in either file
+    `.trim();
+    
+    alert(details);
+}
+
+function renderStudentChapterProgress(studentData) {
+    console.log('Rendering chapter progress for:', studentData);
+    
+    const gridContainer = document.getElementById('chapterGrid');
+    const progressBar = document.getElementById('progressBar');
+    const progressPercent = document.getElementById('progressPercent');
+    const passedChapters = document.getElementById('passedChapters');
+    const failedChapters = document.getElementById('failedChapters');
+    const unreachChapters = document.getElementById('unreachChapters');
+    const totalChapters = document.getElementById('totalChapters');
+    
+    // Update student name
+    currentStudentNameElement.textContent = studentData.name;
+    
+    gridContainer.innerHTML = '';
+    
+    if (!studentData.chapter_progress || studentData.chapter_progress.length === 0) {
+        gridContainer.innerHTML = '<div class="col-span-full text-center py-8 text-gray-500">No chapter progress data available for this student</div>';
+        progressBar.style.width = '0%';
+        progressPercent.textContent = '0%';
+        passedChapters.textContent = '0';
+        failedChapters.textContent = '0';
+        unreachChapters.textContent = '0';
+        totalChapters.textContent = '0';
+        return;
+    }
+    
+    const total = studentData.chapter_progress.length;
+    const passed = studentData.chapter_progress.filter(ch => ch.status === 'completed').length;
+    const failed = studentData.chapter_progress.filter(ch => ch.status === 'failed').length;
+    const unreach = studentData.chapter_progress.filter(ch => ch.status === 'unreach').length;
+    
+    // Calculate progress percentage (passed vs total)
+    const progress = total > 0 ? Math.round((passed / total) * 100) : 0;
+    
+    progressBar.style.width = `${progress}%`;
+    progressPercent.textContent = `${progress}%`;
+    passedChapters.textContent = passed;
+    failedChapters.textContent = failed;
+    unreachChapters.textContent = unreach;
+    totalChapters.textContent = total;
+    
+    // Update file status summary
+    updateFileStatusSummary(studentData.chapter_progress);
+    
+    studentData.chapter_progress.forEach(chapter => {
+        const chapterBlock = createChapterBlock(chapter);
+        gridContainer.appendChild(chapterBlock);
+    });
+}
+
+function updateFileStatusSummary(chapterProgress) {
+    const certStatus = document.getElementById('certStatus');
+    const scoreStatus = document.getElementById('scoreStatus');
+    
+    let certFound = 0, scoreFound = 0;
+    
+    chapterProgress.forEach(chapter => {
+        if (chapter.cert_value !== null) certFound++;
+        if (chapter.score_value !== null) scoreFound++;
+    });
+    
+    /* certStatus.innerHTML = certFound > 0 ? `✅ ${certFound} chapters found` : '❌ File missing';
+    scoreStatus.innerHTML = scoreFound > 0 ? `✅ ${scoreFound} chapters found` : '❌ File missing'; */
+}
+
+// --- Chart Functions ---
+function createChart(rawDataPoints, title) {
+    if (learningCurveChart) {
+        learningCurveChart.destroy();
+    }
+
+    const maxAttempts = getHybridTotalAttempts(rawDataPoints);
+    const { T1, b } = getPowerLawParams(rawDataPoints);
+    const curveData = generatePowerLawCurve(T1, b, maxAttempts, rawDataPoints);
+    
+    const actualPoints = curveData.filter(point => point.type === 'actual');
+    const predictedPoints = curveData.filter(point => point.type === 'predicted');
+    const allPoints = curveData;
+
+    learningCurveChart = new Chart(ctx, {
+        type: 'scatter',
+        data: {
+            datasets: [
+                {
+                    label: 'Actual Data Points',
+                    data: actualPoints.map(d => ({ x: d.x, y: d.y })),
+                    backgroundColor: 'rgba(75, 192, 192, 1)',
+                    pointRadius: 8,
+                    pointHoverRadius: 10,
+                    showLine: false
+                },
+                {
+                    label: 'Learning Curve',
+                    data: allPoints.map(d => ({ x: d.x, y: d.y })),
+                    type: 'line',
+                    fill: false,
+                    borderColor: 'rgb(255, 99, 132)',
+                    borderWidth: 3,
+                    pointRadius: 0,
+                    tension: 0.4
+                },
+                {
+                    label: 'Predicted Points',
+                    data: predictedPoints.map(d => ({ x: d.x, y: d.y })),
+                    backgroundColor: 'rgba(255, 205, 86, 1)',
+                    pointRadius: 6,
+                    pointHoverRadius: 8,
+                    showLine: false
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: {
+                    type: 'linear',
+                    min: 1,
+                    max: maxAttempts,
+                    title: { display: true, text: 'Attempts', font: { size: 16, weight: 'bold' } },
+                    ticks: { stepSize: 1, autoSkip: false }
+                },
+                y: {
+                    min: 0,
+                    suggestedMax: 50,
+                    title: { display: true, text: 'Errors', font: { size: 16, weight: 'bold' } },
+                    ticks: { autoSkip: false, maxTicksLimit: 10 }
+                }
+            },
+            plugins: {
+                tooltip: {
+                    callbacks: {
+                        label: (context) => {
+                            const { x, y } = context.raw;
+                            const pointType = context.datasetIndex === 0 ? 'Actual' : context.datasetIndex === 2 ? 'Predicted' : 'Curve';
+                            return `${pointType} - Attempt: ${x}, Errors: ${y.toFixed(2)}`;
+                        }
+                    }
+                },
+                legend: { labels: { font: { size: 14 }, usePointStyle: true } }
+            }
+        }
+    });
+
+    chartTitleElement.textContent = title + "'s Learning Curve";
+    indexLabelElement.textContent = 'Learning Index (b)';
+    learningIndexElement.textContent = b.toFixed(4);
+    document.getElementById('interpretation').textContent = `Interpretation: ${getLearningInterpretation(b)}`;
+}
+
+// --- Main Initialization ---
+document.addEventListener('DOMContentLoaded', () => {
+    console.log('Initializing student progress page...');
+    console.log('Students data:', rawData.students);
+    
+    if (rawData.students && rawData.students.length > 0) {
+        rawData.students.forEach((student, index) => {
+            const button = document.createElement('button');
+            button.textContent = student.name;
+            button.className = 'student-button bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold py-2 px-4 rounded-full transition duration-200';
+            button.onclick = () => {
+                console.log('Student clicked:', student);
+                createChart(student.data, student.name);
+                renderStudentChapterProgress(student);
+                
+                document.querySelectorAll('.student-button').forEach(btn => {
+                    btn.classList.remove('bg-indigo-600', 'text-white');
+                });
+                button.classList.add('bg-indigo-600', 'text-white');
+            };
+            studentListContainer.appendChild(button);
+            
+            if (index === 0) {
+                setTimeout(() => button.click(), 100);
+            }
+        });
+    } else {
+        studentListContainer.innerHTML = '<p class="text-gray-500">No students found in this course.</p>';
+    }
+});
+</script>
+
+<style>
+.line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+#progressBar {
+    transition: width 0.8s ease-in-out;
+}
+
+#chapterGrid > div {
+    transition: all 0.3s ease;
+}
+
+#chapterGrid > div:hover {
+    transform: translateY(-2px);
+}
+</style>
+
+{% endblock %}
